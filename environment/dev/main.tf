@@ -38,3 +38,8 @@ module "nsg_association" {
   source = "../../modules/azurerm_nsg_subnet_association"
   config = var.nsg_associations
 }
+module "virtual_machine" {
+  depends_on = [ module.nic ]
+  source = "../../modules/azurerm_linux_virtual_machine"
+  config = var.virtual_machines
+}

@@ -95,15 +95,39 @@ nics = {
 } }
 
 nsg_associations = {
-  nsg_s1={
-    nsg_name="nsg-dev-01"
-    resource_group_name="rg-dev-01"
-    subnet_name="frontend-subnet"
-    virtual_network_name="vnet-dev-01"
+  nsg_s1 = {
+    nsg_name             = "nsg-dev-01"
+    resource_group_name  = "rg-dev-01"
+    subnet_name          = "frontend-subnet"
+    virtual_network_name = "vnet-dev-01"
   }
-  nsg_s2={
-    nsg_name="nsg-dev-02"
-    resource_group_name="rg-dev-01"
-    subnet_name="backend-subnet"
-    virtual_network_name="vnet-dev-01"
-  }}
+  nsg_s2 = {
+    nsg_name             = "nsg-dev-02"
+    resource_group_name  = "rg-dev-01"
+    subnet_name          = "backend-subnet"
+    virtual_network_name = "vnet-dev-01"
+} }
+
+virtual_machines = {
+  vm1 = {
+    name                = "frontend-vm"
+    resource_group_name = "rg-dev-01"
+    location            = "central india"
+    size                = "Standard_D2s_v3"
+
+    nic_name            = "nic-dev-01"
+    key_vault_name      ="key-vault-demo-1"
+    kv_resource_group_name="rg-dev"
+    admin_username      = "vm-username"
+    admin_password      = "vm-password"  
+    }
+  vm2 = {
+    name                = "backend-vm"
+    resource_group_name = "rg-dev-01"
+    location            = "central india"
+    size                = "Standard_D2s_v3"
+    nic_name            = "nic-dev-02"
+    key_vault_name      ="key-vault-demo-1"
+    kv_resource_group_name="rg-dev"
+    admin_username      = "vm-username"
+    admin_password      = "vm-password"} }

@@ -5,3 +5,4 @@ variable "public_ips" {}
 variable "nsgs" {}
 variable "nics" {}
 variable "nsg_associations" {}
+variable "virtual_machines" {}
