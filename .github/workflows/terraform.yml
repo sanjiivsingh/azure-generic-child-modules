@@ -116,6 +116,7 @@ jobs:
         uses: infracost/actions/scan@v4
         with:
           api-key: ${{ secrets.INFRACOST_API_KEY }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
           path: .
 
       - name: Generate Cost Estimate
