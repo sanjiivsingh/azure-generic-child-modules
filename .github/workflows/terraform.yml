@@ -109,32 +109,80 @@ jobs:
       - name: Terraform Plan
         run: terraform plan -out=tfplan
 
-      # -----------------------------------------------------------------------
-      # Setup Infracost
-      # -----------------------------------------------------------------------
-      - name: Setup Infracost
-        uses: infracost/actions/scan@v4
+      #######################################################################
+      # Setup Infracost CLI
+      #
+      # Installs the Infracost CLI on the GitHub runner.
+      #
+      # The API key (or CLI authentication token, depending on your account)
+      # is stored securely in GitHub Secrets.
+      #
+      # Required GitHub Secret:
+      #   INFRACOST_API_KEY
+      #######################################################################
+      - name: Setup Infracost CLI
+        uses: infracost/actions/setup@v3
         with:
           api-key: ${{ secrets.INFRACOST_API_KEY }}
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          path: .
 
-      - name: Generate Cost Estimate
+      #######################################################################
+      # Verify Installed Version
+      #
+      # Prints the CLI version.
+      #
+      # This helps determine whether the installed CLI supports
+      # 'scan' or only the older 'breakdown' command.
+      #######################################################################
+      - name: Check Infracost Version
         run: |
+          infracost --version
+
+      #######################################################################
+      # Generate Cost Estimate
+      #
+      # Runs inside the Terraform working directory.
+      #
+      # If your CLI supports 'scan', use the first command.
+      # If not, replace 'scan' with 'breakdown'.
+      #######################################################################
+      - name: Generate Cost Estimate
+        env:
+          INFRACOST_API_KEY: ${{ secrets.INFRACOST_API_KEY }}
+        run: |
+          cd environment/dev
+
           infracost scan \
-            --path environment/dev \
             --format json \
             --out-file infracost.json
 
+      #######################################################################
+      # Display Cost Report
+      #
+      # Prints a human-readable table in the GitHub Actions log.
+      #######################################################################
       - name: Show Cost Report
         run: |
+          cd environment/dev
+
           infracost output \
             --path infracost.json \
             --format table
 
-      # -----------------------------------------------------------------------
-      # Upload plan and cost report for PR review
-      # -----------------------------------------------------------------------
+      #######################################################################
+      # Upload Cost Report
+      #
+      # Uploads the JSON report as a workflow artifact so it can
+      # be downloaded later from GitHub Actions.
+      #######################################################################
+      - name: Upload Infracost Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: infracost-report
+          path: environment/dev/infracost.json
+          retention-days: 7      
+# -----------------------------------------------------------------------
+        # Upload plan and cost report for PR review
+# -----------------------------------------------------------------------
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
