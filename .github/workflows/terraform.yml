@@ -147,10 +147,10 @@ jobs:
       #######################################################################
       - name: Generate Cost Estimate
         env:
+          TF_WORKING_DIR: environment/dev
           INFRACOST_API_KEY: ${{ secrets.INFRACOST_API_KEY }}
         run: |
-          cd environment/dev
-
+          
           infracost scan \
             --format json \
             --out-file infracost.json
