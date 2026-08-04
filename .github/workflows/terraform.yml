@@ -1,201 +1,403 @@
-# ==============================================================================
-# Terraform CI/CD Workflow (Starter Version)
-# ==============================================================================
-# This workflow demonstrates:
-# - Pull Request validation
-# - Push-to-main deployment
-# - Azure Login using OIDC
-# - Terraform fmt/init/validate/plan
-# - Gitleaks secret scanning
-# - Infracost cost estimation
-# - Artifact upload
-# - Conditional terraform apply
+# =============================================================================
+# Terraform Azure Foundation - CI/CD Pipeline
+# =============================================================================
+# Purpose:
+#   Enterprise-grade CI/CD pipeline for a Terraform Azure Foundation repository.
+#   Enforces a strict "validate -> secure -> cost-check -> deploy" flow so that
+#   nothing reaches Azure without passing quality, security, and cost gates.
 #
-# NOTE:
-# This is a starter workflow intended for learning and extension.
-# ==============================================================================
+# Design principles applied:
+#   - Least privilege permissions (default deny, explicit grants only)
+#   - OIDC federated identity for Azure (no long-lived client secrets)
+#   - Separation of validation (PR) from deployment (main push only)
+#   - Immutable, auditable artifacts (tfplan) with bounded retention
+#   - Fail-fast, job-level isolation via `needs` dependency graph
+#   - No duplicated logic between environments/steps (shared env block)
+# =============================================================================
 
-name: Terraform CI/CD
+name: "Terraform Azure Foundation CI/CD"
 
+# -----------------------------------------------------------------------------
+# TRIGGERS
+# -----------------------------------------------------------------------------
+# Why: We only want the pipeline to run on the two events that matter for a
+#      protected-branch workflow:
+#        1. pull_request -> main   : validates proposed changes before merge
+#        2. push -> main           : deploys changes that have already been
+#                                    reviewed, approved, and merged
+# When: Every PR update (open/sync/reopen) and every merge/push to main.
+# Enterprise practice: Branch protection on `main` (no direct pushes, PR +
+#      reviewer approval required) means a "push to main" event can ONLY be
+#      the result of a merged, approved PR - this is what makes it safe to
+#      gate `terraform apply` on this event alone.
+# -----------------------------------------------------------------------------
 on:
   pull_request:
-    branches: [main]
+    branches:
+      - main
   push:
-    branches: [main]
+    branches:
+      - main
 
+# -----------------------------------------------------------------------------
+# PERMISSIONS (least privilege, workflow-level default)
+# -----------------------------------------------------------------------------
+# Why: GITHUB_TOKEN defaults to broad permissions on some org configurations.
+#      We explicitly scope it down to only what each job truly needs:
+#        - id-token: write     -> required for Azure OIDC federated login
+#        - contents: read      -> required to checkout the repository
+#        - pull-requests: write-> required for Infracost/Gitleaks PR comments
+# Individual jobs may further restrict this if they don't need all of it.
+# -----------------------------------------------------------------------------
 permissions:
-  id-token: write # Required for Azure OIDC
-  contents: read # Required to checkout repository
-  pull-requests: write # Allows PR comments (e.g. Infracost)
+  id-token: write
+  contents: read
+  pull-requests: write
 
+# -----------------------------------------------------------------------------
+# CONCURRENCY CONTROL
+# -----------------------------------------------------------------------------
+# Why: Multiple developers pushing/opening PRs simultaneously could otherwise
+#      trigger overlapping Terraform runs against the same state file, causing
+#      state lock contention or race conditions on Azure resources.
+# What: Groups runs by workflow + branch/PR ref, so only one run per ref is
+#      "active" at a time.
+# When: Cancel-in-progress is enabled ONLY for pull_request events (safe to
+#      discard an outdated plan). It is disabled for pushes to main so that an
+#      in-flight `terraform apply` is never killed mid-execution, which could
+#      leave infrastructure in a half-applied state.
+# -----------------------------------------------------------------------------
 concurrency:
-  group: terraform-${{ github.ref }}
-  cancel-in-progress: true
+  group: terraform-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+# -----------------------------------------------------------------------------
+# GLOBAL ENVIRONMENT VARIABLES
+# -----------------------------------------------------------------------------
+# Why: Centralizing shared configuration avoids duplicating values across
+#      every job/step (DRY principle) and makes version bumps a one-line change.
+# ARM_* variables configure the AzureRM provider for OIDC (Workload Identity
+# Federation) authentication - NO client secret is ever used.
+# -----------------------------------------------------------------------------
 env:
-  TF_VERSION: "1.13.1"
-  TF_WORKING_DIR: environment/dev
+  TF_VERSION: "1.9.8"                       # Pin Terraform version repo-wide for reproducibility
+  TF_WORKING_DIR: "environment/dev"         # Root module for this environment
+  TF_IN_AUTOMATION: "true"                  # Cleaner, non-interactive Terraform CLI output
+  ARM_USE_OIDC: "true"                      # Tells AzureRM provider to use OIDC, not a secret
+  ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+  ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+  ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
 jobs:
-  terraform:
-    name: Terraform Validation & Deployment
-    runs-on: ubuntu-latest
 
+  # ===========================================================================
+  # JOB 1: TERRAFORM VALIDATE
+  # ===========================================================================
+  # Why: This is the quality gate every change must pass before anything else
+  #      runs. It catches syntax errors, formatting drift, and invalid
+  #      configuration before spending time on security/cost scans.
+  # What: Checkout -> Terraform setup -> Azure OIDC login -> init -> fmt check
+  #       -> validate -> plan -> upload plan as an artifact for auditability.
+  # When: Runs on every pull_request and every push to main.
+  # Enterprise practice: "Fail fast" - validation is the cheapest, quickest
+  #      check, so it always runs first and every other job depends on it.
+  # ===========================================================================
+  terraform-validate:
+    name: "Terraform Validate"
+    runs-on: ubuntu-latest
     defaults:
       run:
+        shell: bash
         working-directory: ${{ env.TF_WORKING_DIR }}
-
+    outputs:
+      # Exposes the fmt/validate/plan outcome to downstream jobs if ever needed
+      plan-exitcode: ${{ steps.plan.outputs.exitcode }}
     steps:
-      # -----------------------------------------------------------------------
-      # Checkout repository
-      # -----------------------------------------------------------------------
-      - name: Checkout Repository
+
+      # Why: Every job runs in a fresh, ephemeral runner - the repo must be
+      # checked out explicitly in each job.
+      - name: "Checkout repository"
+        uses: actions/checkout@v4
+
+      # Why: Installs the pinned Terraform CLI binary so every run is
+      # reproducible regardless of the runner image's default version.
+      - name: "Setup Terraform CLI"
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false   # Avoids the wrapper masking real exit codes
+
+      # Why: Authenticates to Azure using OIDC federated credentials (no
+      # client secret stored in GitHub). This is the Azure Well-Architected
+      # Framework recommendation for CI/CD identity: short-lived, workload
+      # identity federation tokens instead of long-lived secrets.
+      - name: "Azure Login (OIDC)"
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      # Why: Initializes providers, modules, and the remote backend
+      # (backend.tf) so subsequent commands (validate/plan) have an
+      # accurate, initialized working directory.
+      - name: "Terraform Init"
+        run: terraform init -input=false
+
+      # Why: Enforces consistent code style across the whole repo (root +
+      # modules). Run recursively from the repo root so module code is also
+      # checked, not just the environment root module.
+      # What: Fails the job if any .tf file is not `terraform fmt`-clean.
+      - name: "Terraform Format Check"
+        working-directory: .
+        run: terraform fmt -check -recursive -diff
+
+      # Why: Validates internal consistency of the configuration (types,
+      # references, required arguments) without touching real infrastructure.
+      - name: "Terraform Validate"
+        run: terraform validate
+
+      # Why: Produces a concrete, reviewable execution plan so reviewers can
+      # see exactly what would change before approving the PR. `-detailed-exitcode`
+      # lets us know if there are changes (2), no changes (0), or an error (1).
+      # What: Saves the binary plan file for artifact upload (traceability).
+      - name: "Terraform Plan"
+        id: plan
+        run: |
+          terraform plan -input=false -out=tfplan -detailed-exitcode
+        continue-on-error: true   # We inspect the exit code ourselves below
+
+      # Why: Exit code 1 = real error; 0/2 are both "successful" plan outcomes.
+      # This step makes the job fail loudly on genuine errors while allowing
+      # "has changes" (2) or "no changes" (0) to proceed normally.
+      - name: "Evaluate Plan Result"
+        run: |
+          if [ "${{ steps.plan.outputs.exitcode }}" == "1" ]; then
+            echo "Terraform plan failed with an error."
+            exit 1
+          fi
+          echo "Terraform plan completed successfully (exit code ${{ steps.plan.outputs.exitcode }})."
+
+      # Why: Artifacts provide an auditable, immutable record of exactly what
+      # was planned for a given commit/PR - useful for reviewers and audits.
+      # Note: This PR-time plan is for REVIEW ONLY. It is intentionally never
+      # applied directly (see Job 4 for why).
+      - name: "Upload Terraform Plan Artifact"
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-${{ github.run_id }}
+          path: ${{ env.TF_WORKING_DIR }}/tfplan
+          retention-days: 5     # Short retention: plans go stale fast and may contain sensitive data
+
+  # ===========================================================================
+  # JOB 2: GITLEAKS (SECRET SCANNING)
+  # ===========================================================================
+  # Why: Prevents credentials, API keys, or other secrets from ever being
+  #      committed into the repository history - a critical control for any
+  #      IaC repo where `.tfvars`/state can easily leak sensitive values.
+  # What: Scans the full git history/diff for known secret patterns and fails
+  #       the pipeline if any are found.
+  # When: Runs only after Terraform Validate succeeds (needs), on both PR and
+  #       push events - secrets can be introduced in any commit.
+  # Enterprise practice: Secret scanning is a mandatory, non-negotiable gate
+  #      in any enterprise CI/CD pipeline - it must block the pipeline, not
+  #      just warn.
+  # ===========================================================================
+  gitleaks-scan:
+    name: "Secret Scanning (Gitleaks)"
+    runs-on: ubuntu-latest
+    needs: terraform-validate
+    permissions:
+      contents: read
+      pull-requests: write   # Required for gitleaks to comment findings on PRs
+    steps:
+
+      # Why: fetch-depth: 0 pulls full git history so Gitleaks can scan every
+      # commit, not just the latest snapshot (secrets can hide in past commits).
+      - name: "Checkout repository (full history)"
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # -----------------------------------------------------------------------
-      # Install Terraform CLI
-      # -----------------------------------------------------------------------
-      - name: Setup Terraform
+      # Why: Official, actively maintained Gitleaks action. Fails the job
+      # (and therefore the pipeline) automatically if any leaked secret is
+      # detected - no extra logic needed.
+      - name: "Run Gitleaks Secret Scan"
+        uses: gitleaks/gitleaks-action@v3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # GITLEAKS_LICENSE is only required when scanning repos owned by a
+          # GitHub Organization (not required for personal-account repos).
+          # Uncomment and set the secret if this repo moves under an org:
+          # GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+
+  # ===========================================================================
+  # JOB 3: INFRACOST (CLOUD COST ESTIMATION)
+  # ===========================================================================
+  # Why: Prevents surprise cloud spend by surfacing the cost impact of every
+  #      change BEFORE it is merged/applied - a core FinOps control aligned
+  #      with the Azure Well-Architected Framework's Cost Optimization pillar.
+  # What:
+  #   - On pull_request: runs `infracost/actions/diff@v4` to compare the cost
+  #     of the PR branch against the base branch and post a PR comment.
+  #   - On push to main: runs `infracost/actions/scan@v4` to record the
+  #     merged state's cost baseline in the Infracost Cloud dashboard and
+  #     evaluate any cost/policy guardrails.
+  # When: Runs after both validation and secret scanning succeed - no point
+  #       cost-estimating code that doesn't even validate or that leaks
+  #       secrets.
+  # Note: Uses ONLY the current official infracost/actions building blocks
+  #       (diff/scan) - the legacy `infracost/actions/setup@v3` +
+  #       manual breakdown/diff/comment CLI chain is deprecated guidance.
+  # ===========================================================================
+  infracost:
+    name: "Infracost Cost Estimation"
+    runs-on: ubuntu-latest
+    needs: gitleaks-scan
+    permissions:
+      contents: read
+      pull-requests: write   # Required for Infracost to post the diff comment on the PR
+    steps:
+
+      # --- Pull Request path: cost DIFF between base and head branches -----
+      # Why: Two checkouts (base + head) are required so infracost/actions/diff
+      # can compute an accurate delta between "before" and "after" the PR.
+      # Checkout steps are skipped on a "closed" PR event - the diff action
+      # itself handles updating the Infracost dashboard status (MERGED/CLOSED)
+      # without needing to re-scan code.
+      - name: "Checkout PR head branch"
+        if: github.event_name == 'pull_request' && github.event.action != 'closed'
+        uses: actions/checkout@v4
+        with:
+          path: head
+
+      - name: "Checkout PR base branch"
+        if: github.event_name == 'pull_request' && github.event.action != 'closed'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.ref }}
+          path: base
+
+      - name: "Infracost Diff (Pull Request cost delta)"
+        if: github.event_name == 'pull_request'
+        uses: infracost/actions/diff@v4
+        with:
+          api-key: ${{ secrets.INFRACOST_API_KEY }}
+          base-path: base
+          head-path: head
+
+      # --- Push to main path: baseline cost SCAN of the merged codebase ----
+      # Why: Keeps the Infracost Cloud dashboard's cost baseline in sync with
+      # what is actually deployed, and evaluates any org-wide cost/policy
+      # guardrails against the now-merged main branch.
+      - name: "Checkout main branch"
+        if: github.event_name == 'push'
+        uses: actions/checkout@v4
+
+      - name: "Infracost Scan (main branch cost baseline)"
+        if: github.event_name == 'push'
+        uses: infracost/actions/scan@v4
+        with:
+          api-key: ${{ secrets.INFRACOST_API_KEY }}
+          path: .
+
+  # ===========================================================================
+  # JOB 4: TERRAFORM APPLY (DEPLOYMENT)
+  # ===========================================================================
+  # Why: The actual deployment step - deliberately isolated into its own job
+  #      with the strictest gating conditions in the entire workflow.
+  # What: Re-authenticates, re-initializes, generates a BRAND NEW plan against
+  #       the current state of `main`, and applies that fresh plan.
+  # When: ONLY when `github.event_name == 'push'` AND
+  #       `github.ref == 'refs/heads/main'` - i.e., only for commits that have
+  #       already passed PR review, approval, and merge (branch protection
+  #       guarantees this).
+  #
+  # IMPORTANT - why we do NOT reuse the tfplan artifact from the PR job:
+  #   1. Staleness: time passes between "PR plan" and "merge" - other PRs may
+  #      merge in between, changing the state the original plan was based on.
+  #      Applying an outdated plan risks partial/incorrect changes or a
+  #      rejected apply due to a stale plan checksum.
+  #   2. State drift: Terraform remote state may have changed (manual
+  #      intervention, other pipelines, expired resources) since the PR plan
+  #      was generated - only a plan taken against CURRENT state is safe to
+  #      apply.
+  #   3. Security: a plan artifact generated before human review is not a
+  #      trusted deployment artifact - HashiCorp's recommended pattern is
+  #      "plan-review-apply" as three logically separate, freshly-generated
+  #      steps at MERGE time, not "plan once, apply later."
+  #   4. Immutability & auditability: generating a fresh plan for the exact
+  #      commit being deployed ensures the applied plan and the merged commit
+  #      are always in lock-step, which is essential for audit trails.
+  #
+  # Enterprise practice: This job also targets a GitHub Environment
+  # ("production") which can be configured with required reviewers/manual
+  # approval gates and environment-scoped secrets, giving a final human
+  # checkpoint even after merge, if desired.
+  # ===========================================================================
+  terraform-apply:
+    name: "Terraform Apply (Production Deployment)"
+    runs-on: ubuntu-latest
+    needs:
+      - terraform-validate
+      - gitleaks-scan
+      - infracost
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    environment:
+      name: production   # Enables GitHub Environment protection rules (e.g. required reviewers)
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ env.TF_WORKING_DIR }}
+    steps:
+
+      # Why: Fresh checkout of the exact merge commit on main that triggered
+      # this run - guarantees plan/apply operate on the true deployed state.
+      - name: "Checkout repository"
+        uses: actions/checkout@v4
+
+      - name: "Setup Terraform CLI"
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
 
-      # -----------------------------------------------------------------------
-      # Login to Azure using OIDC
-      # Requires:
-      # AZURE_CLIENT_ID
-      # AZURE_TENANT_ID
-      # AZURE_SUBSCRIPTION_ID
-      # -----------------------------------------------------------------------
-      - name: Azure Login
+      # Why: Deployment credentials are requested fresh in this job too - each
+      # job gets its own short-lived OIDC token; nothing is shared/cached
+      # across jobs, minimizing blast radius if any single job is compromised.
+      - name: "Azure Login (OIDC)"
         uses: azure/login@v2
         with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
-      # -----------------------------------------------------------------------
-      # Initialize Terraform
-      # -----------------------------------------------------------------------
-      - name: Terraform Init
-        run: terraform init
+      - name: "Terraform Init"
+        run: terraform init -input=false
 
-      # -----------------------------------------------------------------------
-      # Check formatting
-      # -----------------------------------------------------------------------
-      - name: Terraform Format
-        run: terraform fmt -check -recursive
-        continue-on-error: true
+      # Why: Generates a brand-new plan against current remote state, taken
+      # at deploy time, immediately before apply (see the job-level comment
+      # block above for the full rationale on why the PR-time plan is never
+      # reused here).
+      - name: "Terraform Plan (fresh, post-merge)"
+        run: terraform plan -input=false -out=tfplan-apply
 
-      # -----------------------------------------------------------------------
-      # Validate configuration
-      # -----------------------------------------------------------------------
-      - name: Terraform Validate
-        run: terraform validate
+      # Why: Applies the plan generated in the step directly above (same job,
+      # same execution) - never a plan file from another job/run. This keeps
+      # "what was reviewed" (via the plan output in logs) and "what was
+      # applied" perfectly consistent within a single, atomic job execution.
+      # `-auto-approve` is safe here because:
+      #   - This job only runs post-merge on a protected branch
+      #   - A GitHub Environment approval gate can require a human sign-off
+      #     before this job is even allowed to start
+      - name: "Terraform Apply"
+        run: terraform apply -input=false -auto-approve tfplan-apply
 
-      # -----------------------------------------------------------------------
-      # Scan repository for hardcoded secrets
-      # -----------------------------------------------------------------------
-      - name: Run Gitleaks
-        uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      # -----------------------------------------------------------------------
-      # Generate Terraform execution plan
-      # -----------------------------------------------------------------------
-      - name: Terraform Plan
-        run: terraform plan -out=tfplan
-
-      #######################################################################
-      # Setup Infracost CLI
-      #
-      # Installs the Infracost CLI on the GitHub runner.
-      #
-      # The API key (or CLI authentication token, depending on your account)
-      # is stored securely in GitHub Secrets.
-      #
-      # Required GitHub Secret:
-      #   INFRACOST_API_KEY
-      #######################################################################
-      - name: Setup Infracost CLI
-        uses: infracost/actions/setup@v3
-        with:
-          api-key: ${{ secrets.INFRACOST_API_KEY }}
-
-      #######################################################################
-      # Verify Installed Version
-      #
-      # Prints the CLI version.
-      #
-      # This helps determine whether the installed CLI supports
-      # 'scan' or only the older 'breakdown' command.
-      #######################################################################
-      - name: Check Infracost Version
-        run: |
-          infracost --version
-
-      #######################################################################
-      # Generate Cost Estimate
-      #
-      # Runs inside the Terraform working directory.
-      #
-      # If your CLI supports 'scan', use the first command.
-      # If not, replace 'scan' with 'breakdown'.
-      #######################################################################
-      - name: Generate Cost Estimate
-        env:
-          TF_WORKING_DIR: environment/dev
-          INFRACOST_API_KEY: ${{ secrets.INFRACOST_API_KEY }}
-        run: |
-          
-          infracost scan \
-            --format json \
-            --out-file infracost.json
-
-      #######################################################################
-      # Display Cost Report
-      #
-      # Prints a human-readable table in the GitHub Actions log.
-      #######################################################################
-      - name: Show Cost Report
-        run: |
-          cd environment/dev
-
-          infracost output \
-            --path infracost.json \
-            --format table
-
-      #######################################################################
-      # Upload Cost Report
-      #
-      # Uploads the JSON report as a workflow artifact so it can
-      # be downloaded later from GitHub Actions.
-      #######################################################################
-      - name: Upload Infracost Report
+      # Why: Retains a record of exactly what was applied to production for
+      # audit and incident-response purposes.
+      - name: "Upload Applied Plan Artifact"
         uses: actions/upload-artifact@v4
         with:
-          name: infracost-report
-          path: environment/dev/infracost.json
-          retention-days: 7      
-# -----------------------------------------------------------------------
-        # Upload plan and cost report for PR review
-# -----------------------------------------------------------------------
-      - name: Upload Artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: terraform-artifacts
-          path: |
-            ${{ env.TF_WORKING_DIR }}/tfplan
-            ${{ env.TF_WORKING_DIR }}/infracost.json
-          retention-days: 7
-
-      # -----------------------------------------------------------------------
-      # Apply infrastructure ONLY after merge to main.
-      # This step is skipped for Pull Requests.
-      # -----------------------------------------------------------------------
-      - name: Terraform Apply
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        run: terraform apply -auto-approve tfplan
+          name: tfplan-applied-${{ github.run_id }}
+          path: ${{ env.TF_WORKING_DIR }}/tfplan-apply
+          retention-days: 30   # Longer retention for production audit trail
