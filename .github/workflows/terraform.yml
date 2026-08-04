@@ -84,9 +84,9 @@ env:
   TF_WORKING_DIR: "environment/dev"         # Root module for this environment
   TF_IN_AUTOMATION: "true"                  # Cleaner, non-interactive Terraform CLI output
   ARM_USE_OIDC: "true"                      # Tells AzureRM provider to use OIDC, not a secret
-  ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
-  ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
-  ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+  ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+  ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+  ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
 jobs:
 
@@ -134,9 +134,9 @@ jobs:
       - name: "Azure Login (OIDC)"
         uses: azure/login@v2
         with:
-          client-id: ${{ vars.AZURE_CLIENT_ID }}
-          tenant-id: ${{ vars.AZURE_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       # Why: Initializes providers, modules, and the remote backend
       # (backend.tf) so subsequent commands (validate/plan) have an
@@ -194,7 +194,7 @@ jobs:
   # ===========================================================================
   # Why: Prevents credentials, API keys, or other secrets from ever being
   #      committed into the repository history - a critical control for any
-  #      IaC repo where `.tfvars`/state can easily leak sensitive values.
+  #      IaC repo where `.tfsecrets`/state can easily leak sensitive values.
   # What: Scans the full git history/diff for known secret patterns and fails
   #       the pipeline if any are found.
   # When: Runs only after Terraform Validate succeeds (needs), on both PR and
@@ -368,9 +368,9 @@ jobs:
       - name: "Azure Login (OIDC)"
         uses: azure/login@v2
         with:
-          client-id: ${{ vars.AZURE_CLIENT_ID }}
-          tenant-id: ${{ vars.AZURE_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       - name: "Terraform Init"
         run: terraform init -input=false
