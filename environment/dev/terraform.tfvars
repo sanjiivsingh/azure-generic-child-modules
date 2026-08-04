@@ -115,19 +115,19 @@ virtual_machines = {
     location            = "central india"
     size                = "Standard_D2s_v3"
 
-    nic_name            = "nic-dev-01"
-    key_vault_name      ="key-vault-demo-1"
-    kv_resource_group_name="rg-dev"
-    admin_username      = "vm-username"
-    admin_password      = "vm-password"  
-    }
+    nic_name               = "nic-dev-01"
+    key_vault_name         = "key-vault-demo-1"
+    kv_resource_group_name = "rg-dev"
+    admin_username         = "vm-username"
+    admin_password         = "vm-password"
+  }
   vm2 = {
-    name                = "backend-vm"
-    resource_group_name = "rg-dev-01"
-    location            = "central india"
-    size                = "Standard_D2s_v3"
-    nic_name            = "nic-dev-02"
-    key_vault_name      ="key-vault-demo-1"
-    kv_resource_group_name="rg-dev"
-    admin_username      = "vm-username"
-    admin_password      = "vm-password"} }
+    name                   = "backend-vm"
+    resource_group_name    = "rg-dev-01"
+    location               = "central india"
+    size                   = "Standard_D2s_v3"
+    nic_name               = "nic-dev-02"
+    key_vault_name         = "key-vault-demo-1"
+    kv_resource_group_name = "rg-dev"
+    admin_username         = "vm-username"
+admin_password = "vm-password" } }

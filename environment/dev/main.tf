@@ -34,12 +34,12 @@ module "nic" {
 }
 
 module "nsg_association" {
-  depends_on = [ module.nsg, module.subnet ]
-  source = "../../modules/azurerm_nsg_subnet_association"
-  config = var.nsg_associations
+  depends_on = [module.nsg, module.subnet]
+  source     = "../../modules/azurerm_nsg_subnet_association"
+  config     = var.nsg_associations
 }
 module "virtual_machine" {
-  depends_on = [ module.nic ]
-  source = "../../modules/azurerm_linux_virtual_machine"
-  config = var.virtual_machines
+  depends_on = [module.nic]
+  source     = "../../modules/azurerm_linux_virtual_machine"
+  config     = var.virtual_machines
 }
