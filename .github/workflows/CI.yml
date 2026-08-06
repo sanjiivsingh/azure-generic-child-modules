@@ -2,7 +2,8 @@ name: Terraform Continuous Integration
 on:
   pull_request:
     branches:
-    - feature/*
+    - main
+    
   workflow_dispatch:
 
 permissions:
