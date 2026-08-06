@@ -46,6 +46,12 @@ jobs:
       - name: Run TFLint
         run: tflint -f compact
 
+      - name: Infracost 
+        uses: infracost/actions/scan@v4
+        with:
+          api-key: ${{ secrets.INFRACOST_API_KEY }}
+          path: .
+
   plan:
     name: Terraform Plan
     needs: scan
