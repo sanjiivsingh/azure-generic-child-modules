@@ -130,4 +130,5 @@ virtual_machines = {
     key_vault_name         = "key-vault-demo-1"
     kv_resource_group_name = "rg-dev"
     admin_username         = "vm-username"
-admin_password = "vm-password" } }
+    admin_password         = "vm-password"
+} }
