@@ -110,11 +110,10 @@ nsg_associations = {
 
 virtual_machines = {
   vm1 = {
-    name                = "frontend-vm"
-    resource_group_name = "rg-dev-01"
-    location            = "central india"
-    size                = "Standard_D2s_v3"
-
+    name                   = "frontend-vm"
+    resource_group_name    = "rg-dev-01"
+    location               = "central india"
+    size                   = "Standard_D2s_v3"
     nic_name               = "nic-dev-01"
     key_vault_name         = "key-vault-demo-1"
     kv_resource_group_name = "rg-dev"
