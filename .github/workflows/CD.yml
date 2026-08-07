@@ -3,11 +3,7 @@ name: Terraform Continuous Deployment
 on:
   push:
     branches:
-    - main
-#   workflow_run:
-#     workflows: ["Terraform Continuous Integration"]
-#     types:
-#       - completed      
+    - main   
 
 permissions:
     id-token: write
