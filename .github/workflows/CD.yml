@@ -51,19 +51,9 @@ jobs:
 
       - name: Terraform Plan
         id: plan
-        run: terraform plan -out=tfplan
+        run: terraform plan 
       
-      - name: Upload Plan Artifact
-        uses: actions/upload-artifact@v7
-        with:
-          path: tfplan
-
-      - name: Download Plan Artifact
-        uses: actions/download-artifact@v8
-        with:
-            path: tfplan
-
       - name: Terraform Apply
-        run: terraform apply -auto-approve tfplan
+        run: terraform apply -auto-approve 
 
 
